@@ -1,0 +1,77 @@
+/* =========================
+   CANONICAL KEY ORDER
+   (Edit to taste. Aliases let your users use readable names.)
+   ========================= */
+
+/*
+const Keys = Object.freeze({
+  shipType: Object.freeze([
+    'CHICKEN_ONE',
+    'CHICKEN_NINE',
+    'ATREGGIES',
+    'CHICKEN_HEAVY',
+    'BCR',
+    'MILLENIUM_CHICKEN',
+    'CORELLIHEN_CORVETTE',
+    'GALEGGTICA',
+    'CHICKFIANT',
+    'VOYEGGER',
+    'HENERPRISE',
+  ]),
+
+  shipDurationType: Object.freeze([
+    'SHORT',
+    'LONG',
+    'EPIC',
+    'TUTORIAL',
+  ]),
+
+  targetArtifact: Object.freeze([
+    'LUNAR_TOTEM',
+    'UNKNOWN',
+    'TACHYON_STONE',
+    'BOOK_OF_BASAN',
+    'PHOENIX_FEATHER',
+    'TUNGSTEN_ANKH',
+    'GOLD_METEORITE',
+    'TAU_CETI_GEODE',
+    'TACHYON_STONE_FRAGMENT',
+    'AURELIAN_BROOCH',
+    'CARVED_RAINSTICK',
+    'PUZZLE_CUBE',
+    'QUANTUM_METRONOME',
+    'SHIP_IN_A_BOTTLE',
+    'TACHYON_DEFLECTOR',
+    'INTERSTELLAR_COMPASS',
+    'DILITHIUM_MONOCLE',
+    'TITANIUM_ACTUATOR',
+    'NEODYMIUM_MEDALLION',
+    'MERCURYS_LENS',
+    'DILITHIUM_STONE',
+    'SHELL_STONE',
+    'LUNAR_STONE',
+    'SOUL_STONE',
+    'QUANTUM_STONE',
+    'TERRA_STONE',
+    'LIFE_STONE',
+    'PROPHECY_STONE',
+    'BEAK_OF_MIDAS',
+    'CLARITY_STONE',
+    'SOLAR_TITANIUM',
+    'DILITHIUM_STONE_FRAGMENT',
+    'SHELL_STONE_FRAGMENT',
+    'LUNAR_STONE_FRAGMENT',
+    'SOUL_STONE_FRAGMENT',
+    'PROPHECY_STONE_FRAGMENT',
+    'QUANTUM_STONE_FRAGMENT',
+    'LIGHT_OF_EGGENDIL',
+    'TERRA_STONE_FRAGMENT',
+    'LIFE_STONE_FRAGMENT',
+    'CLARITY_STONE_FRAGMENT',
+    'DEMETERS_NECKLACE',
+    'VIAL_MARTIAN_DUST',
+    'ORNATE_GUSSET',
+    'THE_CHALICE',
+  ]),
+});
+*/
