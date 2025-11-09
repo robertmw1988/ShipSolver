@@ -145,13 +145,16 @@ function _getsheetbyname(sheetName) {
 }
 
 function _transformALLArtifactData() {
+  // Read the pre-transformed data (now has 3 header rows + 1 full header row)
   var sheet = _getsheetbyname(CFG.dataSheet);
   var data = sheet.getDataRange().getValues();
   
-  var headers = data[0];
-
-  var rows = data.slice(1);
-
+  // Extract headers and data structure
+  var artifactTypes = data[0].slice(4);  // First row: artifact types
+  var tiers = data[1].slice(4);          // Second row: tiers
+  var rarities = data[2].slice(4);       // Third row: rarities
+  var fullHeaders = data[3];             // Fourth row: complete headers
+  var rows = data.slice(4);              // Actual data starts at row 5
 
   // Load ship filters from 'Ship_Parameters' sheet
   var paramSheet = _getsheetbyname(CFG.paramsSheet);
@@ -169,72 +172,37 @@ function _transformALLArtifactData() {
   for (var r = 0; r < rows.length; r++) {
     var row = rows[r];
     for (var f = 0; f < shipFilters.length; f++) {
-      if (row[headers.indexOf("Ship type")] === shipFilters[f][0] &&
-          row[headers.indexOf("Ship level")] === shipFilters[f][1]) {
+      if (row[0] === shipFilters[f][0] &&    // Ship type is first column
+          row[2] === shipFilters[f][1]) {     // Ship level is third column
         filteredRows.push(row);
         break;
       }
     }
   }
 
-  var keyCols = ["Ship type", "Ship duration type", "Ship level", "Target artifact"];
-  var valueCols = ["Artifact type", "Artifact tier", "Artifact rarity"];
-  var totalDropsCol = "Total drops";
+  // Prepare output with the same structure as input
+  var outputRows = [
+    artifactTypes,    // Row 1: Artifact types
+    tiers,           // Row 2: Tiers
+    rarities,        // Row 3: Rarities
+    fullHeaders      // Row 4: Complete headers
+  ];
 
-  var keyIndexes = [];
-  var valueIndexes = [];
-  var totalIndex = headers.indexOf(totalDropsCol);
+  // Add filtered rows to output
+  outputRows = outputRows.concat(filteredRows);
 
-  for (var i = 0; i < keyCols.length; i++) {
-    keyIndexes.push(headers.indexOf(keyCols[i]));
-  }
-  for (var j = 0; j < valueCols.length; j++) {
-    valueIndexes.push(headers.indexOf(valueCols[j]));
-  }
-
-  var pivot = {};
-  var allValueKeys = {};
-
-  for (var r = 0; r < rows.length; r++) {
-    var row = rows[r];
-    var key = [];
-    for (var k = 0; k < keyIndexes.length; k++) {
-      key.push(row[keyIndexes[k]]);
-    }
-    var keyStr = key.join(" | ");
-
-    var valueKey = [];
-    for (var v = 0; v < valueIndexes.length; v++) {
-      valueKey.push(row[valueIndexes[v]]);
-    }
-    var valueStr = valueKey.join(" | ");
-
-    var drops = Number(row[totalIndex]) || 0;
-
-    if (!pivot[keyStr]) {
-      pivot[keyStr] = {};
-    }
-    if (!pivot[keyStr][valueStr]) {
-      pivot[keyStr][valueStr] = 0;
-    }
-    pivot[keyStr][valueStr] += drops;
-
-    allValueKeys[valueStr] = true;
-  }
-
-  // Undroppable artifacts manual addition
-  for (var m = 0; m < UndroppableArtifacts.length; m++) {
-    allValueKeys[UndroppableArtifacts[m]] = true;
-  }
-
+  // Write to output sheet
   var outputSheet = _getsheetbyname(CFG.sheetRawMissionDataTable);
-  var valueKeysList = [];
-  for (var vk in allValueKeys) {
-    if (allValueKeys.hasOwnProperty(vk)) valueKeysList.push(vk);
+  outputSheet.clearContents();
+  
+  if (outputRows.length <= 4) { // Only headers, no data
+    outputSheet.getRange(1, 1, 1, 1).setValue('(no matches)');
+    return;
   }
-
-  // Order value columns by canonical artifact order from Keys.targetArtifact
-  valueKeysList = _orderValueKeysByArtifact(valueKeysList);
+  
+  // Write all rows including headers
+  outputSheet.getRange(1, 1, outputRows.length, outputRows[0].length)
+    .setValues(outputRows);
 
   var headerRow = keyCols.concat(valueKeysList);
   var outRows = [headerRow];
