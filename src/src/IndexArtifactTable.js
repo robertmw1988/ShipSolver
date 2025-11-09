@@ -8,7 +8,9 @@
    ========================= */
 
 var CFG = {
-  dataSheet: 'AllArtifactData',
+  sheetAllDataCSV: 'AllArtifactData',
+  sheetRawMissionDataTable: 'MissionDataRaw',
+  sheetIndexedMissions: 'MissionDataIndexed',
   shipParametersSheet: 'Ship_Parameters',
   // Use Ship_Parameters as the parameter source:
   paramsSheet: 'Ship_Parameters',
@@ -112,6 +114,24 @@ const Keys = Object.freeze({
 });
 
 /* =========================
+    Undroppable Artifacts List
+    These are artifacts that cannot be dropped by any ship, even if they appear in the data.
+    They are manually added to ensure they are included in the final output.
+   ========================= */
+const UndroppableArtifacts = Object.freeze([
+  "BOOK_OF_BASAN | 3 | COMMON",
+  "BOOK_OF_BASAN | 3 | EPIC",
+  "BOOK_OF_BASAN | 3 | LEGENDARY",
+  "TACHYON_DEFLECTOR | 3 | COMMON",
+  "TACHYON_DEFLECTOR | 3 | RARE",
+  "TACHYON_DEFLECTOR | 3 | EPIC",
+  "TACHYON_DEFLECTOR | 3 | LEGENDARY",
+  "CLARITY_STONE | 2 | COMMON",
+  "DILITHIUM_STONE | 2 | COMMON",
+  "PROPHECY_STONE | 2 | COMMON",
+]);
+
+/* =========================
    UTILITIES
    ========================= */
 function _toUpperSnake(s) {
@@ -119,6 +139,115 @@ function _toUpperSnake(s) {
   return String(s).trim().replace(/[\s\-]+/g, '_').toUpperCase();
 }
 
+function _getsheetbyname(sheetName) {
+  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+}
+
+function _transformALLArtifactData() {
+  var sheet = _getsheetbyname(CFG.sheetAllDataCSV);
+  var data = sheet.getDataRange().getValues();
+  
+  var headers = data[0];
+
+  var rows = data.slice(1);
+
+
+  // Load ship filters from 'Ship_Parameters' sheet
+  var paramSheet = _getsheetbyname(CFG.shipParametersSheet);
+  var paramData = paramSheet.getDataRange().getValues();
+  var paramHeaders = paramData[0];
+  var shipTypeIndex = paramHeaders.indexOf("Ship type");
+  var shipLevelIndex = paramHeaders.indexOf("Ship level");
+  var shipFilters = [];
+  for (var i = 1; i < paramData.length; i++) {
+    shipFilters.push([paramData[i][shipTypeIndex], paramData[i][shipLevelIndex]]);
+  }
+
+  // Filter rows based on shipFilters
+  var filteredRows = [];
+  for (var r = 0; r < filteredRows.length; r++) {
+    var row = filteredRows[r];
+    for (var f = 0; f < shipFilters.length; f++) {
+      if (row[headers.indexOf("Ship type")] === shipFilters[f][0] &&
+          row[headers.indexOf("Ship level")] === shipFilters[f][1]) {
+        filteredRows.push(row);
+        break;
+      }
+    }
+  }
+
+  var keyCols = ["Ship type", "Ship duration type", "Ship level", "Target artifact"];
+  var valueCols = ["Artifact type", "Artifact tier", "Artifact rarity"];
+  var totalDropsCol = "Total drops";
+
+  var keyIndexes = [];
+  var valueIndexes = [];
+  var totalIndex = headers.indexOf(totalDropsCol);
+
+  for (var i = 0; i < keyCols.length; i++) {
+    keyIndexes.push(headers.indexOf(keyCols[i]));
+  }
+  for (var j = 0; j < valueCols.length; j++) {
+    valueIndexes.push(headers.indexOf(valueCols[j]));
+  }
+
+  var pivot = {};
+  var allValueKeys = {};
+
+  for (var r = 0; r < rows.length; r++) {
+    var row = rows[r];
+    var key = [];
+    for (var k = 0; k < keyIndexes.length; k++) {
+      key.push(row[keyIndexes[k]]);
+    }
+    var keyStr = key.join(" | ");
+
+    var valueKey = [];
+    for (var v = 0; v < valueIndexes.length; v++) {
+      valueKey.push(row[valueIndexes[v]]);
+    }
+    var valueStr = valueKey.join(" | ");
+
+    var drops = Number(row[totalIndex]) || 0;
+
+    if (!pivot[keyStr]) {
+      pivot[keyStr] = {};
+    }
+    if (!pivot[keyStr][valueStr]) {
+      pivot[keyStr][valueStr] = 0;
+    }
+    pivot[keyStr][valueStr] += drops;
+
+    allValueKeys[valueStr] = true;
+  }
+
+  // Undroppable artifacts manual addition
+  for (var m = 0; m < UndroppableArtifacts.length; m++) {
+    allValueKeys[UndroppableArtifacts[m]] = true;
+  }
+
+  var outputSheet = _getsheetbyname(CFG.sheetRawMissionDataTable);
+  var valueKeysList = [];
+  for (var vk in allValueKeys) {
+    valueKeysList.push(vk);
+  }
+
+  var headerRow = keyCols.concat(valueKeysList);
+  outputSheet.appendRow(headerRow);
+
+  for (var pk in pivot) {
+    var keyParts = pk.split(" | ");
+    var rowOut = keyParts.slice();
+    for (var i = 0; i < valueKeysList.length; i++) {
+      var val = pivot[pk][valueKeysList[i]] || 0;
+      rowOut.push(val);
+    }
+    outputSheet.appendRow(rowOut);
+  }
+}
+
+
+// Reads a sheet and returns { header: { colNameLower: index }, rows: [...], all: [...] }
 function _readSheet(sheetName) {
   var sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
   if (!sh) throw new Error('Sheet not found: ' + sheetName);
@@ -154,7 +283,7 @@ function _cachePut(key, obj, seconds) {
 }
 
 /* =========================
-   ALIASES (ES5)
+   ALIASES BUILDING
    ========================= */
 function _buildAliasesFromSheet() {
   var ck = 'aliases:' + CFG.aliasesSheet;
