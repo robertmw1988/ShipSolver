@@ -36,6 +36,25 @@ function transformData() {
     const keyCols = ['Ship type', 'Ship duration type', 'Ship level', 'Target artifact'];
     const valueCols = ['Artifact type', 'Artifact tier', 'Artifact rarity'];
     
+/* =========================
+    Undroppable Artifacts List
+    These are artifacts that cannot be dropped by any ship, even if they appear in the data.
+    They are manually added to ensure they are included in the final output.
+   ========================= */
+    const UndroppableArtifacts = new Set([ Object.freeze([
+  "BOOK_OF_BASAN | 3 | COMMON",
+  "BOOK_OF_BASAN | 3 | EPIC",
+  "BOOK_OF_BASAN | 3 | LEGENDARY",
+  "TACHYON_DEFLECTOR | 3 | COMMON",
+  "TACHYON_DEFLECTOR | 3 | RARE",
+  "TACHYON_DEFLECTOR | 3 | EPIC",
+  "TACHYON_DEFLECTOR | 3 | LEGENDARY",
+  "CLARITY_STONE | 2 | COMMON",
+  "DILITHIUM_STONE | 2 | COMMON",
+  "PROPHECY_STONE | 2 | COMMON",
+    ])]);
+
+
     // Initialize pivot data structures
     const pivot = {};
     const allValueKeys = new Set();
@@ -61,6 +80,27 @@ function transformData() {
         // Track all possible value combinations
         allValueKeys.add(valueStr);
     }
+
+    // Ensure Undroppable artifact value columns are included even if absent in data
+    // The provided UndroppableArtifacts may be a Set containing a single array (due to wrapping).
+    // Flatten it safely and merge into the value keys set.
+    let undroppableList = [];
+    try {
+        const tmp = UndroppableArtifacts instanceof Set ? Array.from(UndroppableArtifacts) : (UndroppableArtifacts || []);
+        if (tmp.length === 1 && Array.isArray(tmp[0])) {
+            undroppableList = tmp[0];
+        } else {
+            undroppableList = tmp;
+        }
+    } catch (e) {
+        undroppableList = [];
+    }
+    for (const key of undroppableList) {
+        if (typeof key === 'string' && key.indexOf(' | ') !== -1) {
+            allValueKeys.add(key.trim());
+        }
+    }
+    console.log('Undroppable artifact columns added:', undroppableList.length);
     
     // Convert value keys to sorted array and parse components
     const valueKeysList = Array.from(allValueKeys).sort();
@@ -103,10 +143,7 @@ function transformData() {
     console.log('- Value combinations:', valueKeysList.length);
 }
 
-// Install dependencies first:
-// npm init -y
-// npm install csv-parse csv-stringify
-
+// Execute transformation
 try {
     transformData();
 } catch (err) {
