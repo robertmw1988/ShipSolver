@@ -43,7 +43,9 @@ function runBulkSearchesAndOutput() {
   var shipTypeIdx = paramHeaders.indexOf(CFG.paramsCols.shipType);
   var shipDurationIdx = paramHeaders.indexOf(CFG.paramsCols.shipDurationType);
   var levelIdx = paramHeaders.indexOf(CFG.paramsCols.level);
+  var capacityIdx = paramHeaders.indexOf(CFG.paramsCols.capacity);
   var criteriaSets = [];
+  var capacityMap = {}; // Map to store capacity by ship+duration key
   for (var i = 1; i < paramData.length; i++) {
     var row = paramData[i];
     // Only add criteria if at least one value is present
@@ -54,6 +56,10 @@ function runBulkSearchesAndOutput() {
       criteria[CFG.paramsCols.shipDurationType] = row[shipDurationIdx];
       criteria[CFG.paramsCols.level] = row[levelIdx];
       criteriaSets.push(criteria);
+      
+      // Store capacity for this ship+duration combination
+      var key = row[shipTypeIdx] + '|' + row[shipDurationIdx];
+      capacityMap[key] = row[capacityIdx] || 0;
     }
   }
 
@@ -83,8 +89,23 @@ function runBulkSearchesAndOutput() {
     var rarities = allDataWithHeaders[2];
     var fullHeaders = allDataWithHeaders[3];
     
+    // Transform results: calculate ratios and apply capacity
+    var transformedResults = [];
+    for (var i = 0; i < combinedResults.length; i++) {
+      var row = combinedResults[i];
+      // Build key to lookup capacity
+      var shipType = row[CFG.dataCols.shipType] || row['Ship type'];
+      var shipDuration = row[CFG.dataCols.shipDurationType] || row['Ship duration type'];
+      var key = shipType + '|' + shipDuration;
+      var capacity = capacityMap[key] || 0;
+      
+      // Apply transformation
+      var transformed = _transformToDropRates(headers, row, capacity);
+      transformedResults.push(transformed);
+    }
+    
     // Convert results to 2D array
-    var dataForSheet = convertObjectsTo2DArray(headers, combinedResults);
+    var dataForSheet = convertObjectsTo2DArray(headers, transformedResults);
     
     // Prepare output with all header rows
     var outputRows = [
@@ -96,7 +117,7 @@ function runBulkSearchesAndOutput() {
     
     resultsSheet.clearContents();
     resultsSheet.getRange(1, 1, outputRows.length, outputRows[0].length).setValues(outputRows);
-    Logger.log("Wrote %s unique rows to the Results sheet.", combinedResults.length);
+    Logger.log("Wrote %s unique rows to the Results sheet with drop rate calculations.", transformedResults.length);
   } else {
     resultsSheet.clearContents();
     resultsSheet.getRange(1,1,1,1).setValue('(no matches)');
@@ -192,6 +213,52 @@ function convertObjectsTo2DArray(headers, objectArray) {
   }
   return arr;
 }
+
+/**
+ * Calculate the sum of artifact columns for a row.
+ * Artifact columns start at index 4 (after ship type, duration, level, target).
+ */
+function _calculateArtifactSum(headers, rowObj) {
+  var sum = 0;
+  // Start from index 4 to skip the key columns
+  for (var i = 4; i < headers.length; i++) {
+    var val = rowObj[headers[i]];
+    if (typeof val === 'number' && !isNaN(val)) {
+      sum += val;
+    }
+  }
+  return sum;
+}
+
+/**
+ * Transform artifact values to average drop rates.
+ * For each artifact column: (value / rowSum) * capacity
+ */
+function _transformToDropRates(headers, rowObj, capacity) {
+  var rowSum = _calculateArtifactSum(headers, rowObj);
+  if (rowSum === 0 || !capacity || capacity === 0) {
+    return rowObj; // Return unchanged if sum is 0 or no capacity
+  }
+  
+  var transformed = {};
+  for (var i = 0; i < headers.length; i++) {
+    var header = headers[i];
+    if (i < 4) {
+      // Keep key columns unchanged
+      transformed[header] = rowObj[header];
+    } else {
+      // Transform artifact columns
+      var val = rowObj[header];
+      if (typeof val === 'number' && !isNaN(val)) {
+        transformed[header] = (val / rowSum) * capacity;
+      } else {
+        transformed[header] = val;
+      }
+    }
+  }
+  return transformed;
+}
+
 /*******************************************************
  * Egg Inc. Virtue - Mission Retrieval & Solver Prep (ES5)
  * No const/let, no =>, no template literals, no ||= ?? ?.
@@ -222,7 +289,8 @@ var CFG = {
   paramsCols: {
     shipType: 'Ship type',          // <- header in Ship_Parameters
     shipDurationType: 'Ship duration type',  // <- header in Ship_Parameters (Short/Standard/Extended/Tutorial)
-    level: 'Ship level'       // <- user-configured star level per ship & type
+    level: 'Ship level',       // <- user-configured star level per ship & type
+    capacity: 'Capacity'       // <- mission capacity for calculating drop rates
   },
 
   aliasCols: { kind: 'kind', alias: 'alias', canonical: 'canonical' },
@@ -321,113 +389,6 @@ function _toUpperSnake(s) {
 function _getsheetbyname(sheetName) {
   return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
 }
-
-function _transformALLArtifactData() {
-  // Read the pre-transformed data (now has 3 header rows + 1 full header row)
-  var sheet = _getsheetbyname(CFG.dataSheet);
-  var data = sheet.getDataRange().getValues();
-  
-  // Extract headers and data structure
-  // First row: artifact types (artifact columns start at index 4).
-  // Prepend 4 empty cells so these header rows line up with the full header row (which includes the first 4 key columns).
-  var prefixEmpty = ["", "", "", ""]; // for ship type, duration, level, target
-  var artifactTypes = prefixEmpty.concat(data[0].slice(4));  // First row: artifact types
-  var tiers = prefixEmpty.concat(data[1].slice(4));          // Second row: tiers
-  var rarities = prefixEmpty.concat(data[2].slice(4));       // Third row: rarities
-  var fullHeaders = data[3];             // Fourth row: complete headers (already includes key columns)
-  var rows = data.slice(4);              // Actual data starts at row 5
-
-  // Ensure the short header rows are padded to match the full header length
-  try {
-    var targetLen = (fullHeaders && fullHeaders.length) || artifactTypes.length;
-    while (artifactTypes.length < targetLen) artifactTypes.push('');
-    while (tiers.length < targetLen) tiers.push('');
-    while (rarities.length < targetLen) rarities.push('');
-    
-    // Log the actual lengths after padding
-    Logger.log("After padding - artifactTypes: " + artifactTypes.length + 
-               ", tiers: " + tiers.length + 
-               ", rarities: " + rarities.length + 
-               ", fullHeaders: " + fullHeaders.length);
-  } catch (e) {
-    Logger.log("Error during padding: " + e);
-  }
-
-  // Load ship filters from 'Ship_Parameters' sheet
-  var paramSheet = _getsheetbyname(CFG.paramsSheet);
-  var paramData = paramSheet.getDataRange().getValues();
-  var paramHeaders = paramData[0];
-  var shipTypeIndex = paramHeaders.indexOf(CFG.paramsCols.shipType);
-  var shipLevelIndex = paramHeaders.indexOf(CFG.paramsCols.level);
-  var shipFilters = [];
-  for (var i = 1; i < paramData.length; i++) {
-    shipFilters.push([paramData[i][shipTypeIndex], paramData[i][shipLevelIndex]]);
-  }
-
-  // Filter rows based on shipFilters
-  var filteredRows = [];
-  for (var r = 0; r < rows.length; r++) {
-    var row = rows[r];
-    for (var f = 0; f < shipFilters.length; f++) {
-      if (row[0] === shipFilters[f][0] &&    // Ship type is first column
-          row[2] === shipFilters[f][1]) {     // Ship level is third column
-        filteredRows.push(row);
-        break;
-      }
-    }
-  }
-
-  // Prepare output with the same structure as input
-  var outputRows = [
-    artifactTypes,    // Row 1: Artifact types
-    tiers,           // Row 2: Tiers
-    rarities,        // Row 3: Rarities
-    fullHeaders      // Row 4: Complete headers
-  ];
-
-  // Add filtered rows to output
-  outputRows = outputRows.concat(filteredRows);
-
-  // Write to output sheet
-  var outputSheet = _getsheetbyname(CFG.sheetRawMissionDataTable);
-  if (!outputSheet) {
-    outputSheet = SpreadsheetApp.getActive().insertSheet(CFG.sheetRawMissionDataTable);
-  }
-  
-  // Clear the sheet and resize it to match the output data
-  outputSheet.clear();
-  
-  if (outputRows.length <= 4) { // Only headers, no data
-    outputSheet.getRange(1, 1, 1, 1).setValue('(no matches)');
-    return;
-  }
-  
-  // Ensure sheet has enough columns
-  var currentCols = outputSheet.getMaxColumns();
-  var neededCols = outputRows[0].length;
-  // Ensure the sheet has at least neededCols columns. Insert in a loop to avoid API limits.
-  while (outputSheet.getMaxColumns() < neededCols) {
-    var add = Math.min(50, neededCols - outputSheet.getMaxColumns());
-    outputSheet.insertColumnsAfter(outputSheet.getMaxColumns(), add);
-  }
-
-  // Ensure enough rows as well
-  while (outputSheet.getMaxRows() < outputRows.length) {
-    var addRows = Math.min(1000, outputRows.length - outputSheet.getMaxRows());
-    outputSheet.insertRowsAfter(outputSheet.getMaxRows(), addRows);
-  }
-
-  // Force pending changes to apply before write
-  SpreadsheetApp.flush();
-
-  // Write all rows including headers; explicitly use neededCols to avoid mismatch
-  outputSheet.getRange(1, 1, outputRows.length, neededCols).setValues(outputRows);
-
-  // Delete the pivot section as it's not properly defined
-  // We'll handle the data transformation in GET_MISSION_ROWS_BY_PARAM instead
-  return;
-}
-
 
 // Reads a sheet and returns { header: { colNameLower: index }, rows: [...], all: [...] }
 function _readSheet(sheetName) {
@@ -587,7 +548,9 @@ function _buildParamLevelMap() {
   var cached = _cacheGet(ck);
   if (cached) {
     var obj = {};
-    for (var i = 0; i < cached.length; i++) obj[cached[i][0]] = cached[i][1];
+    for (var i = 0; i < cached.length; i++) {
+      obj[cached[i][0]] = { level: cached[i][1], capacity: cached[i][2] };
+    }
     return obj;
   }
 
@@ -597,10 +560,12 @@ function _buildParamLevelMap() {
   var cSt = header[String(CFG.paramsCols.shipType).toLowerCase()];
   var cDu = header[String(CFG.paramsCols.shipDurationType).toLowerCase()];
   var cLv = header[String(CFG.paramsCols.level).toLowerCase()];
-  if (cSt == null || cDu == null || cLv == null) {
+  var cCap = header[String(CFG.paramsCols.capacity).toLowerCase()];
+  if (cSt == null || cDu == null || cLv == null || cCap == null) {
     throw new Error(
       "Params '" + CFG.paramsSheet + "' must have headers: " +
-      CFG.paramsCols.shipType + ", " + CFG.paramsCols.shipDurationType + ", " + CFG.paramsCols.level
+      CFG.paramsCols.shipType + ", " + CFG.paramsCols.shipDurationType + ", " + 
+      CFG.paramsCols.level + ", " + CFG.paramsCols.capacity
     );
   }
 
@@ -614,11 +579,12 @@ function _buildParamLevelMap() {
     var st = _normalizeWithAliases('shipType',        row[cSt], aliases);
     var du = _normalizeWithAliases('shipDurationType', row[cDu], aliases);
     var lv = row[cLv]; // <-- USE StarsHelper AS-IS (e.g., 0..8)
+    var cap = row[cCap]; // <-- Mission capacity
     if (!st || !du) continue;
 
     var key = st + '␞' + du;
-    map[key] = lv;
-    serial.push([key, lv]);
+    map[key] = { level: lv, capacity: cap };
+    serial.push([key, lv, cap]);
   }
 
   _cachePut(ck, serial, CFG.cacheSeconds);
@@ -753,7 +719,7 @@ function _appendUnknowns(canonicalList, actualKeys) {
  * Usage: =GET_MISSION_ROWS_BY_PARAM()
  */
 
-//TODO: check if this works with current _transformALLArtifactData usage
+ //TODO: check if this works with current _transformALLArtifactData usage
 function GET_MISSION_ROWS_BY_PARAM() {
   var built = _buildMissionIndex();
   var index = built.index, all = built.all;
@@ -798,9 +764,11 @@ function GET_MISSION_ROWS_BY_PARAM() {
     for (var d = 0; d < duKeys.length; d++) {
       var du = duKeys[d];
 
-      var pLvRaw = paramMap[st + '␞' + du];
-      Logger.log('Processing %s - %s: param level raw = %s', st, du, pLvRaw);
-      var pLv = (pLvRaw == null || pLvRaw === '') ? CFG.defaultLevelIfMissing : pLvRaw;
+      var paramInfo = paramMap[st + '␞' + du];
+      Logger.log('Processing %s - %s: param info = %s', st, du, JSON.stringify(paramInfo));
+      var pLv = (paramInfo == null || paramInfo.level == null || paramInfo.level === '') 
+        ? CFG.defaultLevelIfMissing 
+        : paramInfo.level;
 
       var lvMap = duMap[String(pLv)];
       Logger.log('For %s - %s - level %s: found map = %s', 
@@ -842,7 +810,7 @@ function GET_MISSION_ROWS_BY_PARAM() {
  *   =GET_MISSION_ROWS_BY_PARAM_PROJECTED("shipType","shipDurationType","missionLevel","targetArtifact")
  */
 
-//TODO: check if this works with current _transformALLArtifactData usage
+ //TODO: check if this works with current _transformALLArtifactData usage
 function GET_MISSION_ROWS_BY_PARAM_PROJECTED() {
   var args = Array.prototype.slice.call(arguments);
   var rows = GET_MISSION_ROWS_BY_PARAM();
@@ -944,7 +912,7 @@ function CLEAR_CACHE() {
 }
 
 
-/**
+ /**
  * Show what star levels exist in the data for a given ship + duration pair.
  * This helps diagnose missing data versus configuration mismatches.
  */
@@ -952,7 +920,7 @@ function DIAG_LEVELS_FOR_PAIR(ship, duration) {
   var built = _buildMissionIndex();
   var aliases = _buildAliasesFromSheet();
   var st = _normalizeWithAliases('shipType', ship, aliases);
-  var du = _normalizeWithAliases('shipDurationType', duration, aliases);
+  du = _normalizeWithAliases('shipDurationType', duration, aliases);
   
   Logger.log('Checking levels in %s for:', CFG.dataSheet);
   Logger.log('  Ship: %s (from "%s")', st, ship);
@@ -997,7 +965,9 @@ function DIAG_PARAM_FOR_PAIR(ship, duration) {
   Logger.log('Checking configuration in %s for:', CFG.paramsSheet);
   Logger.log('  Ship: %s (from "%s")', st, ship);
   Logger.log('  Duration: %s (from "%s")', du, duration);
-  Logger.log('  Configured level: %s', params[key]);
+  var paramInfo = params[key];
+  Logger.log('  Configured level: %s', paramInfo ? paramInfo.level : 'not found');
+  Logger.log('  Configured capacity: %s', paramInfo ? paramInfo.capacity : 'not found');
 }
 
 /**
@@ -1088,7 +1058,7 @@ function DIAG_SAMPLE() {
   var count = 0;
   for (var k in param) {
     if (param.hasOwnProperty(k)) {
-      some.push(k + ' -> ' + param[k]);
+      some.push(k + ' -> level: ' + param[k].level + ', capacity: ' + param[k].capacity);
       if (++count >= 10) break;
     }
   }
@@ -1105,7 +1075,7 @@ function DIAG_SAMPLE() {
 function DIAG_PARAM_INDEX_MISMATCHES() {
   var built = _buildMissionIndex();              // { index, header, all, cols }
   var index = built.index;                       // index[ship][duration][level] -> array of rowIdx
-  var params = _buildParamLevelMap();            // key: 'SHIP␞DURATION' -> level (StarsHelper)
+  var params = _buildParamLevelMap();            // key: 'SHIP␞DURATION' -> { level, capacity }
 
   var missingPairs = [];     // pairs not in index (unknown ship or duration)
   var missingLevels = [];    // pair exists, but StarsHelper level bucket is absent
@@ -1115,7 +1085,8 @@ function DIAG_PARAM_INDEX_MISMATCHES() {
     if (!params.hasOwnProperty(key)) continue;
     var parts = key.split('␞');
     var st = parts[0], du = parts[1];
-    var lv = String(params[key]);
+    var paramInfo = params[key];
+    var lv = String(paramInfo.level);
 
     var shipNode = index[st];
     if (!shipNode) {
@@ -1211,7 +1182,7 @@ function DIAG_MISSING_ALIASES_IN_PARAMS() {
 }
 
 
-/* =========================
+ /* =========================
    MENU & TRIGGERS
    ========================= */
 
