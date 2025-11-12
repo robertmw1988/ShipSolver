@@ -1,0 +1,796 @@
+﻿/**
+ * Egg Inc. Virtue - Mission Retrieval & Solver Prep (ES5)
+ * No const/let, no =>, no template literals, no ||= ?? ?.
+ * 
+ * FILE STRUCTURE:
+ * 1. Bulk Search & Output Functions (runBulkSearchesAndOutput)
+ *    - Source data helpers
+ *    - Criteria building helpers
+ *    - Filtering helpers
+ *    - Output helpers
+ * 2. Transform Data Functions (_transformALLArtifactData)
+ *    - Transform data helpers
+ * 3. Mission Retrieval Functions (GET_MISSION_ROWS_BY_PARAM)
+ *    - Mission retrieval helpers
+ * 4. Configuration & Utilities
+ * 5. Alias Management
+ * 6. Index Building
+ * 7. Diagnostic Functions
+ * 8. Menu & Triggers
+ *******************************************************/
+
+/* =========================
+   CONFIGURATION (global)
+   ========================= */
+if (typeof CFG === 'undefined') {
+  var CFG = {
+    // Sheet names
+    dataSheet: 'AllArtifactData',
+    sheetRawMissionDataTable: 'MissionDataRaw',
+    sheetIndexedMissions: 'MissionDataIndexed',
+    paramsSheet: 'Ship_Parameters',
+    aliasesSheet: 'Aliases',
+    resultsSheet: 'ArtifactsByParams',
+
+    // Column name mappings (source sheets)
+    dataCols: {
+      shipType: 'ship type',
+      shipDurationType: 'ship duration type',
+      targetArtifact: 'target artifact',
+      missionLevel: 'ship level'
+    },
+
+    // Params sheet headers
+    paramsCols: {
+      shipType: 'Ship type',
+      shipDurationType: 'Ship duration type',
+      level: 'Ship level'
+    },
+
+    aliasCols: { kind: 'kind', alias: 'alias', canonical: 'canonical' },
+
+    // Settings
+    defaultLevelIfMissing: 0,
+    includeHeaderRow: true,
+    includeUnknowns: true,
+    cacheSeconds: 0
+  };
+}
+
+/**
+ * Bulk Search & Output - Array-of-Objects Pattern
+ */
+
+/* =========================
+   SOURCE DATA HELPERS
+   ========================= */
+
+/**
+ * Reads and parses the source data sheet (AllArtifactData).
+ * Returns the structured data with headers separated.
+ * 
+ * @param {SpreadsheetApp.Spreadsheet} ss - The active spreadsheet
+ * @return {Object} Object containing artifactTypes, tiers, rarities, headers, and dataRows
+ * @throws {Error} If sheet is empty or has insufficient data
+ */
+function _getSourceSheetData(ss) {
+  var sourceSheet = ss.getSheetByName(CFG.dataSheet);
+  var allDataWithHeaders = sourceSheet.getDataRange().getValues();
+  
+  Logger.log('Using source sheet: %s (rows=%s, cols=%s)', 
+             CFG.dataSheet, allDataWithHeaders.length, 
+             (allDataWithHeaders[0] || []).length);
+  
+  if (!allDataWithHeaders || allDataWithHeaders.length < 5) {
+    throw new Error("Source sheet is empty or has insufficient data.");
+  }
+  
+  // AllArtifactData has 3 special header rows + 1 full header row
+  return {
+    artifactTypes: allDataWithHeaders[0],
+    tiers: allDataWithHeaders[1],
+    rarities: allDataWithHeaders[2],
+    headers: allDataWithHeaders[3],
+    dataRows: allDataWithHeaders.slice(4)
+  };
+}
+
+/**
+ * Converts raw data rows into array of objects using headers.
+ * 
+ * @param {Array<string>} headers - Column headers
+ * @param {Array<Array>} dataRows - Data rows
+ * @return {Array<Object>} Array of row objects with column names as keys
+ */
+function _convertRowsToObjects(headers, dataRows) {
+  var dataAsObjectArray = [];
+  for (var i = 0; i < dataRows.length; i++) {
+    var row = dataRows[i];
+    var entry = {};
+    for (var j = 0; j < headers.length; j++) {
+      if (headers[j] !== '') {
+        entry[headers[j]] = row[j];
+      }
+    }
+    dataAsObjectArray.push(entry);
+  }
+  Logger.log('Converted %s rows to objects', dataAsObjectArray.length);
+  return dataAsObjectArray;
+}
+
+/**
+ * Logs sample row data for debugging purposes.
+ * 
+ * @param {Array<Object>} rowObjects - Array of row objects
+ */
+function _logSampleRow(rowObjects) {
+  if (rowObjects.length > 0) {
+    var sampleRow = rowObjects[0];
+    Logger.log('Sample row keys: %s', Object.keys(sampleRow).slice(0, 10).join(', '));
+    Logger.log('Sample row ship type: "%s", duration: "%s", level: "%s"', 
+               sampleRow['ship type'], 
+               sampleRow['ship duration type'], 
+               sampleRow['ship level']);
+  }
+}
+
+/* =========================
+   CRITERIA HELPERS
+   ========================= */
+
+/**
+ * Builds criteria sets from the Ship_Parameters sheet.
+ * Each criteria set represents one row of filter parameters.
+ * 
+ * @param {SpreadsheetApp.Spreadsheet} ss - The active spreadsheet
+ * @return {Array<Object>} Array of criteria objects
+ */
+function _buildCriteriaSets(ss) {
+  var paramSheet = ss.getSheetByName(CFG.paramsSheet);
+  var paramData = paramSheet.getDataRange().getValues();
+  var paramHeaders = paramData[0];
+  
+  var shipTypeIdx = paramHeaders.indexOf(CFG.paramsCols.shipType);
+  var shipDurationIdx = paramHeaders.indexOf(CFG.paramsCols.shipDurationType);
+  var levelIdx = paramHeaders.indexOf(CFG.paramsCols.level);
+  
+  var criteriaSets = [];
+  for (var i = 1; i < paramData.length; i++) {
+    var row = paramData[i];
+    // Only add criteria if at least one value is present
+    if (row[shipTypeIdx] || row[shipDurationIdx] || 
+        (row[levelIdx] !== undefined && row[levelIdx] !== '')) {
+      var criteria = {};
+      criteria[CFG.paramsCols.shipType] = row[shipTypeIdx];
+      criteria[CFG.paramsCols.shipDurationType] = row[shipDurationIdx];
+      criteria[CFG.paramsCols.level] = row[levelIdx];
+      criteriaSets.push(criteria);
+    }
+  }
+  
+  Logger.log('Built %s criteria sets', criteriaSets.length);
+  return criteriaSets;
+}
+
+/**
+ * Normalizes a single criteria object for comparison.
+ * Applies alias normalization to ship types and duration types.
+ * 
+ * @param {Object} criteria - Raw criteria object
+ * @param {Object} aliases - Alias mapping object
+ * @return {Object} Normalized criteria with only non-empty values
+ */
+function _normalizeCriteria(criteria, aliases) {
+  var columnMap = {
+    'Ship type': 'Ship type',
+    'Ship duration type': 'Ship duration type',
+    'Ship level': 'Ship level'
+  };
+
+  var normalizedCriteria = {};
+  for (var key in criteria) {
+    if (criteria.hasOwnProperty(key)) {
+      var dataKey = columnMap[key] || key;
+      var value = criteria[key];
+      
+      // Only include non-empty values
+      if (value || value === 0) {
+        // Normalize ship types and duration types
+        if (key === 'Ship type') {
+          value = _normalizeWithAliases('shipType', value, aliases);
+        } else if (key === 'Ship duration type') {
+          value = _normalizeWithAliases('shipDurationType', value, aliases);
+        }
+        
+        normalizedCriteria[dataKey] = value;
+      }
+    }
+  }
+  
+  return normalizedCriteria;
+}
+
+/* =========================
+   FILTERING HELPERS
+   ========================= */
+
+/**
+ * Checks if a single row matches the normalized criteria.
+ * All criteria values must match for the row to be included.
+ * 
+ * @param {Object} row - Data row as object
+ * @param {Object} normalizedCriteria - Normalized criteria to match
+ * @param {Object} aliases - Alias mapping object
+ * @return {boolean} True if row matches all criteria
+ */
+function _rowMatchesCriteria(row, normalizedCriteria, aliases) {
+  for (var key in normalizedCriteria) {
+    if (!normalizedCriteria.hasOwnProperty(key)) continue;
+    
+    // Normalize row values for comparison
+    var rowValue = row[key];
+    if (key === 'Ship type') {
+      rowValue = _normalizeWithAliases('shipType', rowValue, aliases);
+    } else if (key === 'Ship duration type') {
+      rowValue = _normalizeWithAliases('shipDurationType', rowValue, aliases);
+    }
+
+    if (rowValue != normalizedCriteria[key]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Filters data rows by a single criteria set.
+ * 
+ * @param {Array<Object>} dataObjectArray - Array of data row objects
+ * @param {Object} criteria - Criteria to filter by
+ * @return {Array<Object>} Filtered rows matching criteria
+ */
+function _filterRowsByCriteria(dataObjectArray, criteria) {
+  // Skip empty criteria sets entirely
+  if (!criteria['Ship type'] && !criteria['Ship duration type'] && 
+      (criteria['Ship level'] === undefined || criteria['Ship level'] === '')) {
+    return [];
+  }
+
+  var aliases = _buildAliasesFromSheet();
+  var normalizedCriteria = _normalizeCriteria(criteria, aliases);
+  
+  Logger.log('Normalized criteria: %s', JSON.stringify(normalizedCriteria));
+
+  return dataObjectArray.filter(function(row) {
+    return _rowMatchesCriteria(row, normalizedCriteria, aliases);
+  });
+}
+
+/**
+ * Filters and deduplicates rows across multiple criteria sets.
+ * 
+ * @param {Array<Object>} allRowsAsObjects - All data rows as objects
+ * @param {Array<Object>} criteriaSets - Array of criteria to filter by
+ * @return {Array<Object>} Combined unique rows matching any criteria
+ */
+function _filterAndDeduplicateRows(allRowsAsObjects, criteriaSets) {
+  var combinedResults = [];
+  var seenRows = {};
+  
+  Logger.log('Processing %s criteria sets', criteriaSets.length);
+  
+  for (var i = 0; i < criteriaSets.length; i++) {
+    var criteria = criteriaSets[i];
+    Logger.log('Original criteria: %s', JSON.stringify(criteria));
+    
+    var matchingRows = _filterRowsByCriteria(allRowsAsObjects, criteria);
+    Logger.log('Found %s matching rows for criteria', matchingRows.length);
+    
+    for (var j = 0; j < matchingRows.length; j++) {
+      var row = matchingRows[j];
+      var rowId = JSON.stringify(row);
+      if (!seenRows[rowId]) {
+        seenRows[rowId] = true;
+        combinedResults.push(row);
+      }
+    }
+  }
+  
+  Logger.log('Total unique rows after filtering: %s', combinedResults.length);
+  return combinedResults;
+}
+
+/* =========================
+   OUTPUT HELPERS
+   ========================= */
+
+/**
+ * Converts array of objects back to 2D array using header order.
+ * 
+ * @param {Array<string>} headers - Column headers in desired order
+ * @param {Array<Object>} objectArray - Array of row objects
+ * @return {Array<Array>} 2D array of values
+ */
+function _convertObjectsTo2DArray(headers, objectArray) {
+  var arr = [];
+  for (var i = 0; i < objectArray.length; i++) {
+    var obj = objectArray[i];
+    var row = [];
+    for (var j = 0; j < headers.length; j++) {
+      row.push(obj[headers[j]]);
+    }
+    arr.push(row);
+  }
+  return arr;
+}
+
+/**
+ * Writes filtered results to the results sheet.
+ * Includes all header rows (artifact types, tiers, rarities, full headers).
+ * 
+ * @param {SpreadsheetApp.Sheet} resultsSheet - The sheet to write to
+ * @param {Object} sourceData - Source data structure with headers
+ * @param {Array<Object>} combinedResults - Filtered and deduplicated results
+ */
+function _writeResultsToSheet(resultsSheet, sourceData, combinedResults) {
+  if (combinedResults.length === 0) {
+    resultsSheet.clearContents();
+    resultsSheet.getRange(1,1,1,1).setValue('(no matches)');
+    Logger.log("No matching rows found for any criteria.");
+    return;
+  }
+  
+  // Convert results to 2D array
+  var dataForSheet = _convertObjectsTo2DArray(sourceData.headers, combinedResults);
+  
+  // Prepare output with all header rows
+  var outputRows = [
+    sourceData.artifactTypes,
+    sourceData.tiers,
+    sourceData.rarities,
+    sourceData.headers
+  ].concat(dataForSheet);
+  
+  resultsSheet.clearContents();
+  resultsSheet.getRange(1, 1, outputRows.length, outputRows[0].length).setValues(outputRows);
+  Logger.log("Wrote %s unique rows to the Results sheet.", combinedResults.length);
+}
+
+/* =========================
+   MAIN ORCHESTRATION
+   ========================= */
+
+/**
+ * Main entry point for bulk search and output.
+ * Orchestrates the entire process:
+ * 1. Read source data
+ * 2. Build filter criteria
+ * 3. Filter and deduplicate rows
+ * 4. Write results to sheet
+ */
+function runBulkSearchesAndOutput() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var resultsSheet = ss.getSheetByName(CFG.resultsSheet) || ss.insertSheet(CFG.resultsSheet);
+
+  try {
+    // 1. Get source data
+    var sourceData = _getSourceSheetData(ss);
+    
+    // 2. Convert to objects for easier filtering
+    var allRowsAsObjects = _convertRowsToObjects(sourceData.headers, sourceData.dataRows);
+    _logSampleRow(allRowsAsObjects);
+    
+    // 3. Build criteria sets from parameters
+    var criteriaSets = _buildCriteriaSets(ss);
+    
+    // 4. Filter and deduplicate
+    var combinedResults = _filterAndDeduplicateRows(allRowsAsObjects, criteriaSets);
+    
+    // 5. Write results
+    _writeResultsToSheet(resultsSheet, sourceData, combinedResults);
+    
+  } catch (e) {
+    Logger.log("Error in runBulkSearchesAndOutput: %s", e.message);
+    resultsSheet.clearContents();
+    resultsSheet.getRange(1,1,1,1).setValue('Error: ' + e.message);
+  }
+}
+
+/* =========================
+   LEGACY COMPATIBILITY
+   ========================= */
+
+/**
+ * @deprecated Use _convertRowsToObjects instead
+ */
+function convertToObjects(headers, dataRows) {
+  return _convertRowsToObjects(headers, dataRows);
+}
+
+/**
+ * @deprecated Use _filterRowsByCriteria instead
+ */
+function filterDataByCriteria(dataObjectArray, criteria) {
+  return _filterRowsByCriteria(dataObjectArray, criteria);
+}
+
+/**
+ * @deprecated Use _convertObjectsTo2DArray instead
+ */
+function convertObjectsTo2DArray(headers, objectArray) {
+  return _convertObjectsTo2DArray(headers, objectArray);
+}
+
+/* =========================
+   TRANSFORM DATA HELPERS
+   ========================= */
+
+/**
+ * Reads and extracts header structure from AllArtifactData sheet.
+ * The sheet has a special 4-row header structure.
+ * 
+ * @param {SpreadsheetApp.Sheet} sheet - The data sheet
+ * @return {Object} Object with artifactTypes, tiers, rarities, fullHeaders, and dataRows
+ */
+function _readTransformDataStructure(sheet) {
+  var data = sheet.getDataRange().getValues();
+  
+  // First row: artifact types (artifact columns start at index 4).
+  // Prepend 4 empty cells so these header rows line up with the full header row
+  var prefixEmpty = ["", "", "", ""]; // for ship type, duration, level, target
+  var artifactTypes = prefixEmpty.concat(data[0].slice(4));  // First row: artifact types
+  var tiers = prefixEmpty.concat(data[1].slice(4));          // Second row: tiers
+  var rarities = prefixEmpty.concat(data[2].slice(4));       // Third row: rarities
+  var fullHeaders = data[3];             // Fourth row: complete headers (already includes key columns)
+  var rows = data.slice(4);              // Actual data starts at row 5
+
+  return {
+    artifactTypes: artifactTypes,
+    tiers: tiers,
+    rarities: rarities,
+    fullHeaders: fullHeaders,
+    dataRows: rows
+  };
+}
+
+/**
+ * Pads header rows to match the full header length.
+ * Ensures all header rows have the same number of columns.
+ * 
+ * @param {Object} dataStructure - Object with artifactTypes, tiers, rarities, fullHeaders
+ * @return {Object} Same object with padded arrays
+ */
+function _padHeaderRows(dataStructure) {
+  try {
+    var targetLen = (dataStructure.fullHeaders && dataStructure.fullHeaders.length) || 
+                    dataStructure.artifactTypes.length;
+    
+    while (dataStructure.artifactTypes.length < targetLen) dataStructure.artifactTypes.push('');
+    while (dataStructure.tiers.length < targetLen) dataStructure.tiers.push('');
+    while (dataStructure.rarities.length < targetLen) dataStructure.rarities.push('');
+    
+    // Log the actual lengths after padding
+    Logger.log("After padding - artifactTypes: " + dataStructure.artifactTypes.length + 
+               ", tiers: " + dataStructure.tiers.length + 
+               ", rarities: " + dataStructure.rarities.length + 
+               ", fullHeaders: " + dataStructure.fullHeaders.length);
+  } catch (e) {
+    Logger.log("Error during padding: " + e);
+  }
+  
+  return dataStructure;
+}
+
+/**
+ * Builds ship filter array from Ship_Parameters sheet.
+ * Each filter is [shipType, shipLevel].
+ * 
+ * @param {SpreadsheetApp.Sheet} paramSheet - The parameters sheet
+ * @return {Array<Array>} Array of [shipType, shipLevel] pairs
+ */
+function _buildShipFilters(paramSheet) {
+  var paramData = paramSheet.getDataRange().getValues();
+  var paramHeaders = paramData[0];
+  var shipTypeIndex = paramHeaders.indexOf(CFG.paramsCols.shipType);
+  var shipLevelIndex = paramHeaders.indexOf(CFG.paramsCols.level);
+  
+  var shipFilters = [];
+  for (var i = 1; i < paramData.length; i++) {
+    shipFilters.push([paramData[i][shipTypeIndex], paramData[i][shipLevelIndex]]);
+  }
+  
+  Logger.log('Built %s ship filters', shipFilters.length);
+  return shipFilters;
+}
+
+/**
+ * Filters data rows based on ship type and level filters.
+ * 
+ * @param {Array<Array>} rows - Data rows from source
+ * @param {Array<Array>} shipFilters - Array of [shipType, shipLevel] pairs
+ * @return {Array<Array>} Filtered rows matching any filter
+ */
+function _applyShipFilters(rows, shipFilters) {
+  var filteredRows = [];
+  for (var r = 0; r < rows.length; r++) {
+    var row = rows[r];
+    for (var f = 0; f < shipFilters.length; f++) {
+      if (row[0] === shipFilters[f][0] &&    // Ship type is first column
+          row[2] === shipFilters[f][1]) {     // Ship level is third column
+        filteredRows.push(row);
+        break;
+      }
+    }
+  }
+  
+  Logger.log('Filtered to %s rows from %s total', filteredRows.length, rows.length);
+  return filteredRows;
+}
+
+/**
+ * Ensures output sheet has enough rows and columns for the data.
+ * Adds rows/columns as needed.
+ * 
+ * @param {SpreadsheetApp.Sheet} outputSheet - The sheet to resize
+ * @param {number} neededRows - Number of rows needed
+ * @param {number} neededCols - Number of columns needed
+ */
+function _ensureSheetSize(outputSheet, neededRows, neededCols) {
+  // Ensure sheet has enough columns
+  while (outputSheet.getMaxColumns() < neededCols) {
+    var add = Math.min(50, neededCols - outputSheet.getMaxColumns());
+    outputSheet.insertColumnsAfter(outputSheet.getMaxColumns(), add);
+  }
+
+  // Ensure enough rows as well
+  while (outputSheet.getMaxRows() < neededRows) {
+    var addRows = Math.min(1000, neededRows - outputSheet.getMaxRows());
+    outputSheet.insertRowsAfter(outputSheet.getMaxRows(), addRows);
+  }
+  
+  Logger.log('Sheet sized to %s rows x %s cols', neededRows, neededCols);
+}
+
+/**
+ * Writes output rows to sheet with proper sizing.
+ * 
+ * @param {SpreadsheetApp.Sheet} outputSheet - The sheet to write to
+ * @param {Array<Array>} outputRows - All rows including headers
+ */
+function _writeTransformedData(outputSheet, outputRows) {
+  outputSheet.clear();
+  
+  if (outputRows.length <= 4) { // Only headers, no data
+    outputSheet.getRange(1, 1, 1, 1).setValue('(no matches)');
+    return;
+  }
+  
+  var neededCols = outputRows[0].length;
+  _ensureSheetSize(outputSheet, outputRows.length, neededCols);
+  
+  // Force pending changes to apply before write
+  SpreadsheetApp.flush();
+
+  // Write all rows including headers
+  outputSheet.getRange(1, 1, outputRows.length, neededCols).setValues(outputRows);
+  Logger.log('Wrote %s rows to output sheet', outputRows.length);
+}
+
+/**
+ * Main transformation function.
+ * Reads AllArtifactData, filters by Ship_Parameters, writes to MissionDataRaw.
+ */
+function _transformALLArtifactData() {
+  // Read source data
+  var sheet = _getsheetbyname(CFG.dataSheet);
+  var dataStructure = _readTransformDataStructure(sheet);
+  dataStructure = _padHeaderRows(dataStructure);
+  
+  // Load ship filters from parameters
+  var paramSheet = _getsheetbyname(CFG.paramsSheet);
+  var shipFilters = _buildShipFilters(paramSheet);
+  
+  // Filter rows based on shipFilters
+  var filteredRows = _applyShipFilters(dataStructure.dataRows, shipFilters);
+  
+  // Prepare output with the same structure as input
+  var outputRows = [
+    dataStructure.artifactTypes,    // Row 1: Artifact types
+    dataStructure.tiers,           // Row 2: Tiers
+    dataStructure.rarities,        // Row 3: Rarities
+    dataStructure.fullHeaders      // Row 4: Complete headers
+  ].concat(filteredRows);
+  
+  // Write to output sheet
+  var outputSheet = _getsheetbyname(CFG.sheetRawMissionDataTable);
+  if (!outputSheet) {
+    outputSheet = SpreadsheetApp.getActive().insertSheet(CFG.sheetRawMissionDataTable);
+  }
+  
+  _writeTransformedData(outputSheet, outputRows);
+}
+
+/* =========================
+   MISSION RETRIEVAL HELPERS
+   ========================= */
+
+/**
+ * Determines which ship type keys to process based on configuration.
+ * Includes unknowns if configured to do so.
+ * 
+ * @param {Array<string>} actualKeys - Ship types present in index
+ * @return {Array<string>} Ordered list of ship types to process
+ */
+function _getShipTypeKeysToProcess(actualKeys) {
+  var stKeys;
+  if (CFG.includeUnknowns) {
+    stKeys = _appendUnknowns(Keys.shipType, actualKeys);
+  } else {
+    stKeys = [];
+    for (var si = 0; si < Keys.shipType.length; si++) {
+      var sk = Keys.shipType[si];
+      if (actualKeys.indexOf(sk) !== -1) stKeys.push(sk);
+    }
+  }
+  return stKeys;
+}
+
+/**
+ * Determines which duration type keys to process for a ship.
+ * 
+ * @param {Array<string>} actualKeys - Duration types present for this ship
+ * @return {Array<string>} Ordered list of duration types to process
+ */
+function _getDurationKeysToProcess(actualKeys) {
+  var duKeys;
+  if (CFG.includeUnknowns) {
+    duKeys = _appendUnknowns(Keys.shipDurationType, actualKeys);
+  } else {
+    duKeys = [];
+    for (var di = 0; di < Keys.shipDurationType.length; di++) {
+      var dk = Keys.shipDurationType[di];
+      if (actualKeys.indexOf(dk) !== -1) duKeys.push(dk);
+    }
+  }
+  return duKeys;
+}
+
+/**
+ * Determines which target artifact keys to process for a ship/duration/level.
+ * 
+ * @param {Array<string>} actualKeys - Target artifacts present in data
+ * @return {Array<string>} Ordered list of target artifacts to process
+ */
+function _getTargetArtifactKeysToProcess(actualKeys) {
+  var taKeys;
+  if (CFG.includeUnknowns) {
+    taKeys = _appendUnknowns(Keys.targetArtifact, actualKeys);
+  } else {
+    taKeys = [];
+    for (var ti = 0; ti < Keys.targetArtifact.length; ti++) {
+      var tg = Keys.targetArtifact[ti];
+      if (actualKeys.indexOf(tg) !== -1) taKeys.push(tg);
+    }
+  }
+  return taKeys;
+}
+
+/**
+ * Gets the param level for a ship/duration pair, or default if missing.
+ * 
+ * @param {Object} paramMap - Map of ship+duration to level
+ * @param {string} st - Ship type
+ * @param {string} du - Duration type
+ * @return {number|string} The level value
+ */
+function _getParamLevel(paramMap, st, du) {
+  var pLvRaw = paramMap[st + '␞' + du];
+  Logger.log('Processing %s - %s: param level raw = %s', st, du, pLvRaw);
+  return (pLvRaw == null || pLvRaw === '') ? CFG.defaultLevelIfMissing : pLvRaw;
+}
+
+/**
+ * Processes all target artifacts for a given ship/duration/level combination.
+ * Adds matching rows to the output array.
+ * 
+ * @param {Object} lvMap - Level map containing target artifacts
+ * @param {Array<Array>} all - All data rows from source
+ * @param {Array<Array>} out - Output array to append to
+ * @param {string} st - Ship type
+ * @param {string} du - Duration type
+ * @param {number|string} pLv - Parameter level
+ */
+function _processTargetArtifacts(lvMap, all, out, st, du, pLv) {
+  var taActual = Object.keys(lvMap);
+  var taKeys = _getTargetArtifactKeysToProcess(taActual);
+
+  for (var t = 0; t < taKeys.length; t++) {
+    var ta = taKeys[t];
+    var rowIdxs = lvMap[ta];
+    Logger.log('Checking %s - %s - level %s - target %s: found %s rows', 
+              st, du, pLv, ta, (rowIdxs && rowIdxs.length) || 0);
+    if (!rowIdxs || !rowIdxs.length) continue;
+    
+    for (var r = 0; r < rowIdxs.length; r++) {
+      var ri = rowIdxs[r];
+      out.push(all[ri - 1]);
+    }
+  }
+}
+
+/**
+ * Processes all durations for a given ship type.
+ * 
+ * @param {Object} duMap - Duration map from index
+ * @param {Object} paramMap - Parameter level map
+ * @param {Array<Array>} all - All data rows
+ * @param {Array<Array>} out - Output array
+ * @param {string} st - Ship type
+ */
+function _processDurations(duMap, paramMap, all, out, st) {
+  var duActual = Object.keys(duMap);
+  var duKeys = _getDurationKeysToProcess(duActual);
+
+  for (var d = 0; d < duKeys.length; d++) {
+    var du = duKeys[d];
+    var pLv = _getParamLevel(paramMap, st, du);
+
+    var lvMap = duMap[String(pLv)];
+    Logger.log('For %s - %s - level %s: found map = %s', 
+              st, du, pLv, lvMap ? 'yes (keys: ' + Object.keys(lvMap).join(', ') + ')' : 'no');
+    if (!lvMap) continue;
+
+    _processTargetArtifacts(lvMap, all, out, st, du, pLv);
+  }
+}
+
+/**
+ * Processes all ship types from the index.
+ * 
+ * @param {Object} index - Mission index
+ * @param {Object} paramMap - Parameter level map
+ * @param {Array<Array>} all - All data rows
+ * @param {Array<Array>} out - Output array
+ */
+function _processShipTypes(index, paramMap, all, out) {
+  var stActual = Object.keys(index);
+  var stKeys = _getShipTypeKeysToProcess(stActual);
+
+  for (var s = 0; s < stKeys.length; s++) {
+    var st = stKeys[s];
+    var duMap = index[st];
+    Logger.log('For ship %s: found durations = %s', 
+               st, duMap ? Object.keys(duMap).join(', ') : 'none');
+    if (!duMap) continue;
+
+    _processDurations(duMap, paramMap, all, out, st);
+  }
+}
+
+/**
+ * Returns full rows from AllArtifactData where:
+ *   missionLevel == Params level for that (shipType, shipDurationType).
+ * Output order: shipType -> shipDurationType -> targetArtifact (canonical).
+ * Usage: =GET_MISSION_ROWS_BY_PARAM()
+ * 
+ * @return {Array<Array>} Filtered mission rows with header
+ * @customfunction
+ */
+function GET_MISSION_ROWS_BY_PARAM() {
+  var built = _buildMissionIndex();
+  var index = built.index;
+  var all = built.all;
+  var paramMap = _buildParamLevelMap();
+  
+  Logger.log('Mission Index built - all rows: %s', all.length);
+  Logger.log('ParamMap keys: %s', Object.keys(paramMap).join(', '));
+  Logger.log('ShipTypes in index: %s', Object.keys(index).join(', '));
+
+  var out = [];
+  if (CFG.includeHeaderRow) out.push(all[0]);
+
+  _processShipTypes(index, paramMap, all, out);
+
+  if (out.length === (CFG.includeHeaderRow ? 1 : 0)) return [['(no matches)']];
+  return out;
+}

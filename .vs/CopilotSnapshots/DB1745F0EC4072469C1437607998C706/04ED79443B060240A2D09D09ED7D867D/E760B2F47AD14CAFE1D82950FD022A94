@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Bulk Search & Output - Array-of-Objects Pattern
  */
 function runBulkSearchesAndOutput() {
@@ -24,7 +24,6 @@ function runBulkSearchesAndOutput() {
   
   // Convert master data into array of objects
   var allRowsAsObjects = convertToObjects(headers, masterDataRows);
-  var aliases = _buildAliasesFromSheet();
   Logger.log('Total source rows: %s', masterDataRows.length);
   
   // Log a sample row to see what we're working with
@@ -44,9 +43,7 @@ function runBulkSearchesAndOutput() {
   var shipTypeIdx = paramHeaders.indexOf(CFG.paramsCols.shipType);
   var shipDurationIdx = paramHeaders.indexOf(CFG.paramsCols.shipDurationType);
   var levelIdx = paramHeaders.indexOf(CFG.paramsCols.level);
-  var capacityIdx = paramHeaders.indexOf(CFG.paramsCols.capacity);
   var criteriaSets = [];
-  var capacityMap = {}; // Map to store capacity by ship+duration key
   for (var i = 1; i < paramData.length; i++) {
     var row = paramData[i];
     // Only add criteria if at least one value is present
@@ -57,20 +54,6 @@ function runBulkSearchesAndOutput() {
       criteria[CFG.paramsCols.shipDurationType] = row[shipDurationIdx];
       criteria[CFG.paramsCols.level] = row[levelIdx];
       criteriaSets.push(criteria);
-      
-      // Store capacity for this ship+duration combination
-      var rawShip = row[shipTypeIdx];
-      var rawDuration = row[shipDurationIdx];
-      var normalizedShip = _normalizeWithAliases('shipType', rawShip, aliases);
-      var normalizedDuration = _normalizeWithAliases('shipDurationType', rawDuration, aliases);
-      var capacityValue = Number(row[capacityIdx]);
-      if (isNaN(capacityValue)) capacityValue = 0;
-
-      var rawKey = (rawShip || '') + '|' + (rawDuration || '');
-      if (rawKey !== '|') capacityMap[rawKey] = capacityValue;
-
-      var normalizedKey = normalizedShip + '|' + normalizedDuration;
-      if (normalizedKey !== '|') capacityMap[normalizedKey] = capacityValue;
     }
   }
 
@@ -80,7 +63,7 @@ function runBulkSearchesAndOutput() {
   Logger.log('Processing %s criteria sets', criteriaSets.length);
   criteriaSets.forEach(function(criteria) {
     Logger.log('Original criteria: %s', JSON.stringify(criteria));
-    var matchingRows = filterDataByCriteria(allRowsAsObjects, criteria, aliases);
+    var matchingRows = filterDataByCriteria(allRowsAsObjects, criteria);
     Logger.log('Found %s matching rows for criteria', matchingRows.length);
     matchingRows.forEach(function(row) {
       var rowId = JSON.stringify(row);
@@ -100,28 +83,8 @@ function runBulkSearchesAndOutput() {
     var rarities = allDataWithHeaders[2];
     var fullHeaders = allDataWithHeaders[3];
     
-    // Transform results: calculate ratios and apply capacity
-    var transformedResults = [];
-    for (var i = 0; i < combinedResults.length; i++) {
-      var row = combinedResults[i];
-      // Build key to lookup capacity
-      var shipType = row[CFG.dataCols.shipType] || row['Ship type'];
-      var shipDuration = row[CFG.dataCols.shipDurationType] || row['Ship duration type'];
-      var normalizedShipType = _normalizeWithAliases('shipType', shipType, aliases);
-      var normalizedDurationType = _normalizeWithAliases('shipDurationType', shipDuration, aliases);
-      var rawKey = (shipType || '') + '|' + (shipDuration || '');
-      var normalizedKey = normalizedShipType + '|' + normalizedDurationType;
-      var capacity = 0;
-      if (capacityMap.hasOwnProperty(normalizedKey)) capacity = capacityMap[normalizedKey];
-      else if (capacityMap.hasOwnProperty(rawKey)) capacity = capacityMap[rawKey];
-      
-      // Apply transformation
-      var transformed = _transformToDropRates(headers, row, capacity);
-      transformedResults.push(transformed);
-    }
-    
     // Convert results to 2D array
-    var dataForSheet = convertObjectsTo2DArray(headers, transformedResults);
+    var dataForSheet = convertObjectsTo2DArray(headers, combinedResults);
     
     // Prepare output with all header rows
     var outputRows = [
@@ -133,7 +96,7 @@ function runBulkSearchesAndOutput() {
     
     resultsSheet.clearContents();
     resultsSheet.getRange(1, 1, outputRows.length, outputRows[0].length).setValues(outputRows);
-    Logger.log("Wrote %s unique rows to the Results sheet with drop rate calculations.", transformedResults.length);
+    Logger.log("Wrote %s unique rows to the Results sheet.", combinedResults.length);
   } else {
     resultsSheet.clearContents();
     resultsSheet.getRange(1,1,1,1).setValue('(no matches)');
@@ -156,7 +119,7 @@ function convertToObjects(headers, dataRows) {
   return dataAsObjectArray;
 }
 
-function filterDataByCriteria(dataObjectArray, criteria, aliases) {
+function filterDataByCriteria(dataObjectArray, criteria) {
   // Skip empty criteria sets entirely
   if (!criteria['Ship type'] && !criteria['Ship duration type'] && 
       (criteria['Ship level'] === undefined || criteria['Ship level'] === '')) {
@@ -164,60 +127,53 @@ function filterDataByCriteria(dataObjectArray, criteria, aliases) {
   }
 
   // Map parameter sheet column names to data sheet column names
-  var columnMap = {};
-  columnMap[CFG.paramsCols.shipType] = CFG.dataCols.shipType;
-  columnMap[CFG.paramsCols.shipDurationType] = CFG.dataCols.shipDurationType;
-  columnMap[CFG.paramsCols.level] = CFG.dataCols.missionLevel;
+  // AllArtifactData uses capitalized column names
+  var columnMap = {
+    'Ship type': 'Ship type',
+    'Ship duration type': 'Ship duration type',
+    'Ship level': 'Ship level'
+  };
 
-  aliases = aliases || _buildAliasesFromSheet();
-  var normalizedCriteria = {};
-  var normalizationKinds = {};
-  var missionLevelKeyLower = String(CFG.dataCols.missionLevel).toLowerCase();
+  // Get aliases for normalization
+  var aliases = _buildAliasesFromSheet();
 
   // Normalize the criteria values
+  var normalizedCriteria = {};
   for (var key in criteria) {
-    if (!criteria.hasOwnProperty(key)) continue;
-    var value = criteria[key];
-    if (value === '' || value == null) continue;
-
-    var dataKey = columnMap[key] || key;
-    var dataKeyLower = String(dataKey).toLowerCase();
-
-    if (dataKey === CFG.dataCols.shipType) {
-      normalizationKinds[dataKey] = 'shipType';
-      value = _normalizeWithAliases('shipType', value, aliases);
-    } else if (dataKey === CFG.dataCols.shipDurationType) {
-      normalizationKinds[dataKey] = 'shipDurationType';
-      value = _normalizeWithAliases('shipDurationType', value, aliases);
-    } else if (dataKeyLower === missionLevelKeyLower) {
-      value = Number(value);
+    if (criteria.hasOwnProperty(key)) {
+      var dataKey = columnMap[key] || key;
+      var value = criteria[key];
+      
+      // Only include non-empty values
+      if (value || value === 0) {
+        // Normalize ship types and duration types
+        if (key === 'Ship type') {
+          value = _normalizeWithAliases('shipType', value, aliases);
+        } else if (key === 'Ship duration type') {
+          value = _normalizeWithAliases('shipDurationType', value, aliases);
+        }
+        
+        normalizedCriteria[dataKey] = value;
+      }
     }
-
-    normalizedCriteria[dataKey] = value;
   }
 
   Logger.log('Normalized criteria: %s', JSON.stringify(normalizedCriteria));
 
-  if (!Object.keys(normalizedCriteria).length) return [];
-
   return dataObjectArray.filter(function(row) {
     for (var key in normalizedCriteria) {
-      if (!normalizedCriteria.hasOwnProperty(key)) continue;
-      var targetValue = normalizedCriteria[key];
-      var rowValue = _getRowValueCaseInsensitive(row, key);
+      // Never skip criteria - all normalized criteria must match
 
-      if (rowValue == null || rowValue === '') {
-        return false;
+      // Normalize row values for comparison
+      var rowValue = row[key];
+      if (key === 'ship type') {
+        rowValue = _normalizeWithAliases('shipType', rowValue, aliases);
+      } else if (key === 'ship duration type') {
+        rowValue = _normalizeWithAliases('shipDurationType', rowValue, aliases);
       }
 
-      if (normalizationKinds[key]) {
-        rowValue = _normalizeWithAliases(normalizationKinds[key], rowValue, aliases);
-        if (rowValue != targetValue) return false;
-      } else if (String(key).toLowerCase() === missionLevelKeyLower) {
-        rowValue = Number(rowValue);
-        if (Number(rowValue) != Number(targetValue)) return false;
-      } else {
-        if (rowValue != targetValue) return false;
+      if (rowValue != normalizedCriteria[key]) {
+        return false;
       }
     }
     return true;
@@ -235,17 +191,6 @@ function convertObjectsTo2DArray(headers, objectArray) {
     arr.push(row);
   }
   return arr;
-}
-
-function _getRowValueCaseInsensitive(row, key) {
-  if (row.hasOwnProperty(key)) return row[key];
-  var target = String(key).toLowerCase();
-  for (var prop in row) {
-    if (row.hasOwnProperty(prop) && String(prop).toLowerCase() === target) {
-      return row[prop];
-    }
-  }
-  return row[key];
 }
 
 /**
@@ -424,6 +369,113 @@ function _getsheetbyname(sheetName) {
   return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
 }
 
+function _transformALLArtifactData() {
+  // Read the pre-transformed data (now has 3 header rows + 1 full header row)
+  var sheet = _getsheetbyname(CFG.dataSheet);
+  var data = sheet.getDataRange().getValues();
+  
+  // Extract headers and data structure
+  // First row: artifact types (artifact columns start at index 4).
+  // Prepend 4 empty cells so these header rows line up with the full header row (which includes the first 4 key columns).
+  var prefixEmpty = ["", "", "", ""]; // for ship type, duration, level, target
+  var artifactTypes = prefixEmpty.concat(data[0].slice(4));  // First row: artifact types
+  var tiers = prefixEmpty.concat(data[1].slice(4));          // Second row: tiers
+  var rarities = prefixEmpty.concat(data[2].slice(4));       // Third row: rarities
+  var fullHeaders = data[3];             // Fourth row: complete headers (already includes key columns)
+  var rows = data.slice(4);              // Actual data starts at row 5
+
+  // Ensure the short header rows are padded to match the full header length
+  try {
+    var targetLen = (fullHeaders && fullHeaders.length) || artifactTypes.length;
+    while (artifactTypes.length < targetLen) artifactTypes.push('');
+    while (tiers.length < targetLen) tiers.push('');
+    while (rarities.length < targetLen) rarities.push('');
+    
+    // Log the actual lengths after padding
+    Logger.log("After padding - artifactTypes: " + artifactTypes.length + 
+               ", tiers: " + tiers.length + 
+               ", rarities: " + rarities.length + 
+               ", fullHeaders: " + fullHeaders.length);
+  } catch (e) {
+    Logger.log("Error during padding: " + e);
+  }
+
+  // Load ship filters from 'Ship_Parameters' sheet
+  var paramSheet = _getsheetbyname(CFG.paramsSheet);
+  var paramData = paramSheet.getDataRange().getValues();
+  var paramHeaders = paramData[0];
+  var shipTypeIndex = paramHeaders.indexOf(CFG.paramsCols.shipType);
+  var shipLevelIndex = paramHeaders.indexOf(CFG.paramsCols.level);
+  var shipFilters = [];
+  for (var i = 1; i < paramData.length; i++) {
+    shipFilters.push([paramData[i][shipTypeIndex], paramData[i][shipLevelIndex]]);
+  }
+
+  // Filter rows based on shipFilters
+  var filteredRows = [];
+  for (var r = 0; r < rows.length; r++) {
+    var row = rows[r];
+    for (var f = 0; f < shipFilters.length; f++) {
+      if (row[0] === shipFilters[f][0] &&    // Ship type is first column
+          row[2] === shipFilters[f][1]) {     // Ship level is third column
+        filteredRows.push(row);
+        break;
+      }
+    }
+  }
+
+  // Prepare output with the same structure as input
+  var outputRows = [
+    artifactTypes,    // Row 1: Artifact types
+    tiers,           // Row 2: Tiers
+    rarities,        // Row 3: Rarities
+    fullHeaders      // Row 4: Complete headers
+  ];
+
+  // Add filtered rows to output
+  outputRows = outputRows.concat(filteredRows);
+
+  // Write to output sheet
+  var outputSheet = _getsheetbyname(CFG.sheetRawMissionDataTable);
+  if (!outputSheet) {
+    outputSheet = SpreadsheetApp.getActive().insertSheet(CFG.sheetRawMissionDataTable);
+  }
+  
+  // Clear the sheet and resize it to match the output data
+  outputSheet.clear();
+  
+  if (outputRows.length <= 4) { // Only headers, no data
+    outputSheet.getRange(1, 1, 1, 1).setValue('(no matches)');
+    return;
+  }
+  
+  // Ensure sheet has enough columns
+  var currentCols = outputSheet.getMaxColumns();
+  var neededCols = outputRows[0].length;
+  // Ensure the sheet has at least neededCols columns. Insert in a loop to avoid API limits.
+  while (outputSheet.getMaxColumns() < neededCols) {
+    var add = Math.min(50, neededCols - outputSheet.getMaxColumns());
+    outputSheet.insertColumnsAfter(outputSheet.getMaxColumns(), add);
+  }
+
+  // Ensure enough rows as well
+  while (outputSheet.getMaxRows() < outputRows.length) {
+    var addRows = Math.min(1000, outputRows.length - outputSheet.getMaxRows());
+    outputSheet.insertRowsAfter(outputSheet.getMaxRows(), addRows);
+  }
+
+  // Force pending changes to apply before write
+  SpreadsheetApp.flush();
+
+  // Write all rows including headers; explicitly use neededCols to avoid mismatch
+  outputSheet.getRange(1, 1, outputRows.length, neededCols).setValues(outputRows);
+
+  // Delete the pivot section as it's not properly defined
+  // We'll handle the data transformation in GET_MISSION_ROWS_BY_PARAM instead
+  return;
+}
+
+
 // Reads a sheet and returns { header: { colNameLower: index }, rows: [...], all: [...] }
 function _readSheet(sheetName) {
   var sh = SpreadsheetApp.getActive().getSheetByName(sheetName);
@@ -561,7 +613,7 @@ function _resolveCols(header, desired) {
       for (var i = 0; i < alts.length; i++) {
         var alt = alts[i];
         var altKey = String(alt).toLowerCase();
-        if (header.hasOwnProperty(altKey)) { idx = header[altKey]; break; }
+        if header.hasOwnProperty(altKey)) { idx = header[altKey]; break; }
       }
     }
     if (idx == null) {
@@ -798,11 +850,9 @@ function GET_MISSION_ROWS_BY_PARAM() {
     for (var d = 0; d < duKeys.length; d++) {
       var du = duKeys[d];
 
-      var paramInfo = paramMap[st + '␞' + du];
-      Logger.log('Processing %s - %s: param info = %s', st, du, JSON.stringify(paramInfo));
-      var pLv = (paramInfo == null || paramInfo.level == null || paramInfo.level === '') 
-        ? CFG.defaultLevelIfMissing 
-        : paramInfo.level;
+      var pLvRaw = paramMap[st + '␞' + du];
+      Logger.log('Processing %s - %s: param level raw = %s', st, du, pLvRaw);
+      var pLv = (pLvRaw == null || pLvRaw === '') ? CFG.defaultLevelIfMissing : pLvRaw;
 
       var lvMap = duMap[String(pLv)];
       Logger.log('For %s - %s - level %s: found map = %s', 
@@ -999,9 +1049,7 @@ function DIAG_PARAM_FOR_PAIR(ship, duration) {
   Logger.log('Checking configuration in %s for:', CFG.paramsSheet);
   Logger.log('  Ship: %s (from "%s")', st, ship);
   Logger.log('  Duration: %s (from "%s")', du, duration);
-  var paramInfo = params[key];
-  Logger.log('  Configured level: %s', paramInfo ? paramInfo.level : 'not found');
-  Logger.log('  Configured capacity: %s', paramInfo ? paramInfo.capacity : 'not found');
+  Logger.log('  Configured level: %s', params[key]);
 }
 
 /**
@@ -1092,7 +1140,7 @@ function DIAG_SAMPLE() {
   var count = 0;
   for (var k in param) {
     if (param.hasOwnProperty(k)) {
-      some.push(k + ' -> level: ' + param[k].level + ', capacity: ' + param[k].capacity);
+      some.push(k + ' -> ' + param[k]);
       if (++count >= 10) break;
     }
   }
@@ -1109,7 +1157,7 @@ function DIAG_SAMPLE() {
 function DIAG_PARAM_INDEX_MISMATCHES() {
   var built = _buildMissionIndex();              // { index, header, all, cols }
   var index = built.index;                       // index[ship][duration][level] -> array of rowIdx
-  var params = _buildParamLevelMap();            // key: 'SHIP␞DURATION' -> { level, capacity }
+  var params = _buildParamLevelMap();            // key: 'SHIP␞DURATION' -> level (StarsHelper)
 
   var missingPairs = [];     // pairs not in index (unknown ship or duration)
   var missingLevels = [];    // pair exists, but StarsHelper level bucket is absent
@@ -1119,8 +1167,7 @@ function DIAG_PARAM_INDEX_MISMATCHES() {
     if (!params.hasOwnProperty(key)) continue;
     var parts = key.split('␞');
     var st = parts[0], du = parts[1];
-    var paramInfo = params[key];
-    var lv = String(paramInfo.level);
+    var lv = String(params[key]);
 
     var shipNode = index[st];
     if (!shipNode) {
