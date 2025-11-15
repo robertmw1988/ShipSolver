@@ -331,7 +331,7 @@ var CFG = {
   defaultLevelIfMissing: 0,
   includeHeaderRow: true,
   includeUnknowns: true,
-  cacheSeconds: 0
+  cacheSeconds: 300
 };
 
 /* =========================
